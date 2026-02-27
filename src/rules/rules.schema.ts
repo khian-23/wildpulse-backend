@@ -7,25 +7,25 @@ export type SpeciesRuleDocument = SpeciesRule & Document;
 export class SpeciesRule {
 
   @Prop({ required: true, unique: true })
-  species: string;
+  species!: string;
 
   @Prop({ required: true })
-  min_confidence: number;
+  min_confidence!: number;
 
   @Prop({ required: true })
-  notify_threshold: number;
+  notify_threshold!: number;
 
   @Prop({ default: true })
-  is_active: boolean;
+  is_active!: boolean;
 
   @Prop({ default: 1 })
-  priority: number;
+  priority!: number;
 }
 
 export const SpeciesRuleSchema =
   SchemaFactory.createForClass(SpeciesRule);
 
-  SpeciesRuleSchema.index(
+SpeciesRuleSchema.index(
   { species: 1, is_active: 1 },
   { background: true }
 );
