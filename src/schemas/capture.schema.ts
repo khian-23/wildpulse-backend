@@ -26,6 +26,33 @@ export class Capture {
 
   @Prop()
   ai_summary?: string;
+
+  @Prop()
+  captured_at?: Date;
+
+  @Prop()
+  zone_id?: string;
+
+  @Prop({ default: false })
+  is_night?: boolean;
+
+  @Prop({ default: 0 })
+  risk_score?: number;
+
+  @Prop({ type: [String], default: [] })
+  risk_reasons?: string[];
+
+  @Prop({ default: false })
+  is_unusual?: boolean;
+
+  @Prop({ default: false })
+  should_alert?: boolean;
+
+  @Prop({ default: 'low' })
+  priority?: string;
+
+  createdAt?: Date;
+  updatedAt?: Date;
 }
 
 export const CaptureSchema =

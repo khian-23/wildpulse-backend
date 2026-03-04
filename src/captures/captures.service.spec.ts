@@ -3,6 +3,10 @@ import { getModelToken } from '@nestjs/mongoose';
 import { CapturesService } from './captures.service';
 import { Capture } from '../schemas/capture.schema';
 import { ConfigService } from '@nestjs/config';
+import { AiService } from '../ai/ai.service';
+import { UsageService } from '../usage/usage.service';
+import { RulesService } from '../rules/rules.service';
+import { IntelligenceService } from './intelligence.service';
 
 describe('CapturesService', () => {
   let service: CapturesService;
@@ -17,6 +21,10 @@ describe('CapturesService', () => {
       return map[key];
     }),
   };
+  const aiServiceMock = { generateSummary: jest.fn() };
+  const usageServiceMock = { tryConsume: jest.fn() };
+  const rulesServiceMock = { evaluate: jest.fn() };
+  const intelligenceServiceMock = { score: jest.fn() };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -29,6 +37,22 @@ describe('CapturesService', () => {
         {
           provide: ConfigService,
           useValue: configServiceMock,
+        },
+        {
+          provide: AiService,
+          useValue: aiServiceMock,
+        },
+        {
+          provide: UsageService,
+          useValue: usageServiceMock,
+        },
+        {
+          provide: RulesService,
+          useValue: rulesServiceMock,
+        },
+        {
+          provide: IntelligenceService,
+          useValue: intelligenceServiceMock,
         },
       ],
     }).compile();

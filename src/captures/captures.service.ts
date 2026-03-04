@@ -8,6 +8,7 @@ import { RulesService } from '../rules/rules.service';
 import { AiService } from '../ai/ai.service';
 import { UsageService } from '../usage/usage.service';
 import { logger } from '../common/logger/wildpulse.logger';
+import { IntelligenceService } from './intelligence.service';
 
 @Injectable()
 export class CapturesService {
@@ -18,6 +19,7 @@ export class CapturesService {
     private readonly aiService: AiService,
     private readonly usageService: UsageService,
     private readonly rulesService: RulesService,
+    private readonly intelligenceService: IntelligenceService,
   ) {
     const cloudName = this.configService.get<string>('CLOUDINARY_CLOUD_NAME');
     const apiKey = this.configService.get<string>('CLOUDINARY_API_KEY');
@@ -67,12 +69,18 @@ export class CapturesService {
     const { device_id } = body;
     const confidence = Number(body.confidence);
     const species = body.species.toLowerCase().trim();
+    const zoneId = body.zone_id?.trim();
+    const capturedAt = body.captured_at ? new Date(body.captured_at) : new Date();
 
     // STEP 1 — Rule evaluation
     const decision = await this.rulesService.evaluate(
       species,
       confidence,
     );
+
+    const REVIEW_THRESHOLD = 0.5;
+    let resolvedStatus = decision.status;
+    let resolvedReason = decision.reason;
 
     if (decision.status === 'discard') {
 
@@ -86,6 +94,14 @@ export class CapturesService {
         message: 'Capture discarded by rule engine',
         reason: decision.reason,
       };
+    }
+
+    if (confidence > REVIEW_THRESHOLD) {
+      resolvedStatus = 'approved';
+      resolvedReason = 'confidence_above_0_50';
+    } else {
+      resolvedStatus = 'needs_review';
+      resolvedReason = 'confidence_at_or_below_0_50';
     }
 
     // STEP 2 — Upload to Cloudinary
@@ -108,8 +124,16 @@ export class CapturesService {
       species,
       confidence,
       image_url: uploadResult.secure_url,
-      status: decision.status,
-      rule_reason: decision.reason,
+      status: resolvedStatus,
+      rule_reason: resolvedReason,
+      captured_at: capturedAt,
+      zone_id: zoneId,
+      ...this.intelligenceService.score({
+        species,
+        confidence,
+        capturedAt,
+        zoneId,
+      }),
     });
 
     await capture.save();
@@ -118,7 +142,22 @@ export class CapturesService {
       capture_id: capture._id,
       device_id,
       status: capture.status,
+      rule_reason: capture.rule_reason,
+      risk_score: capture.risk_score,
+      should_alert: capture.should_alert,
+      priority: capture.priority,
     });
+
+    if (capture.should_alert) {
+      logger.warn('Smart alert triggered', {
+        capture_id: capture._id,
+        device_id,
+        species,
+        risk_score: capture.risk_score,
+        risk_reasons: capture.risk_reasons,
+        zone_id: capture.zone_id,
+      });
+    }
 
     // STEP 4 — Background AI processing
     this.processAIAsync(capture._id.toString()).catch((err) => {

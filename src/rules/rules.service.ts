@@ -20,7 +20,7 @@ export class RulesService {
     const rule = await this.rulesRepo.findActiveBySpecies(species);
 
     if (!rule) {
-      return { status: 'discard', reason: 'no_active_rule' };
+      return { status: 'needs_review', reason: 'no_active_rule' };
     }
 
     if (confidence < rule.min_confidence) {

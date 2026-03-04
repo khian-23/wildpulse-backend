@@ -1,0 +1,154 @@
+import time
+import threading
+
+from ultralytics import YOLO
+
+from app.capture.camera import Camera
+from app.capture.motion import MotionDetector
+from app.config import config
+from app.uploader.retry_queue import RetryQueue
+from app.uploader.worker import UploadWorker
+from app.utils.logger import get_logger
+
+logger = get_logger()
+
+
+class Orchestrator:
+    def __init__(self):
+        self.camera = Camera()
+        self.motion = MotionDetector()
+        self.queue = RetryQueue()
+        self.live_enabled = True
+        self._capture_lock = threading.Lock()
+
+        logger.info("Orchestrator initialized")
+        logger.info("Loading YOLOv8 Nano model...")
+        self.model = YOLO("yolov8n.pt")
+
+        self.worker = UploadWorker()
+        self.worker.start()
+
+    def classify(self, image_path):
+        results = self.model(image_path, verbose=False)
+
+        if not results or len(results[0].boxes) == 0:
+            logger.info("No objects detected.")
+            return None, 0.0
+
+        boxes = results[0].boxes
+        names = results[0].names
+
+        best_conf = 0.0
+        best_label = None
+
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            label = names[cls_id]
+
+            if conf > best_conf:
+                best_conf = conf
+                best_label = label
+
+        logger.info(f"Detected {best_label} ({round(best_conf, 2)})")
+        return best_label, round(best_conf, 2)
+
+    def _is_recording(self):
+        return hasattr(self.camera, "_record_proc") and self.camera._record_proc is not None
+
+    def _process_capture(self, force_upload=False, manual_mode=False):
+        if self._is_recording():
+            logger.warning("Capture skipped: recording in progress")
+            return False
+
+        if not self._capture_lock.acquire(blocking=False):
+            logger.warning("Capture skipped: camera is busy")
+            return False
+
+        try:
+            image = self.camera.capture()
+            if not image:
+                return False
+
+            if manual_mode:
+                species = "manual"
+                confidence = 1.0
+                logger.info("Manual capture: forcing species='manual'")
+            else:
+                species, confidence = self.classify(image)
+
+                if force_upload and not species:
+                    species = "manual_capture"
+                    confidence = config.MIN_CONFIDENCE_LOCAL
+                    logger.info(
+                        "Manual capture with no detection. Forcing upload as manual_capture."
+                    )
+
+                if not species:
+                    return False
+
+                if confidence < config.MIN_CONFIDENCE_LOCAL:
+                    if force_upload:
+                        confidence = config.MIN_CONFIDENCE_LOCAL
+                        logger.info("Manual capture below threshold. Forcing upload.")
+                    else:
+                        logger.info("Confidence below threshold. Discarding.")
+                        return False
+
+            self.queue.add_event(image, species, confidence)
+            return True
+        finally:
+            self._capture_lock.release()
+
+    def start_live(self):
+        self.live_enabled = True
+        logger.info("Live mode enabled")
+
+    def stop_live(self):
+        self.live_enabled = False
+        logger.info("Live mode disabled")
+
+    def capture_now(self):
+        logger.info("Manual capture_now command received")
+
+        if self._is_recording():
+            logger.warning("capture_now ignored: recording in progress")
+            return
+
+        if not self._process_capture(manual_mode=True):
+            time.sleep(1.0)
+            self._process_capture(manual_mode=True)
+
+    def start_recording(self):
+        logger.info("Manual start_recording command received")
+
+        if hasattr(self.camera, "start_recording"):
+            output = self.camera.start_recording()
+            logger.info(f"Recording start result: {output}")
+        else:
+            logger.warning("Camera.start_recording() is not implemented")
+
+    def stop_recording(self):
+        logger.info("Manual stop_recording command received")
+
+        if hasattr(self.camera, "stop_recording"):
+            output = self.camera.stop_recording()
+            logger.info(f"Recording stop result: {output}")
+        else:
+            logger.warning("Camera.stop_recording() is not implemented")
+
+    def run(self):
+        logger.info("System armed. Waiting for motion...")
+
+        while True:
+            if not self.live_enabled:
+                time.sleep(1)
+                continue
+
+            if self._is_recording():
+                time.sleep(1)
+                continue
+
+            self.motion.wait_for_motion()
+            self._process_capture()
+            time.sleep(5)

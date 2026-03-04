@@ -11,6 +11,7 @@ import { AuthModule } from './auth/auth.module';
 import { RulesModule } from './rules/rules.module';
 import { Capture, CaptureSchema } from './schemas/capture.schema';
 import { AiUsage, AiUsageSchema } from './usage/usage.schema';
+import { PiCommand, PiCommandSchema } from './schemas/pi-command.schema';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -33,6 +34,7 @@ import { AiUsage, AiUsageSchema } from './usage/usage.schema';
     MongooseModule.forFeature([
       { name: Capture.name, schema: CaptureSchema },
       { name: AiUsage.name, schema: AiUsageSchema },
+      { name: PiCommand.name, schema: PiCommandSchema },
     ]),
   ],
   controllers: [AppController],  // ✅ THIS

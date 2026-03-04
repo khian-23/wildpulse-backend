@@ -1,0 +1,379 @@
+# WildPulse Pi Update Reference
+# Use this file as the single source of truth for required Pi changes.
+# Target project: wildpulse-pi
+
+# ============================================================
+# 1) UPDATE FILE: app/config.py
+# ============================================================
+# Add API_BASE_URL and COMMAND_POLL_INTERVAL_SEC.
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    DEVICE_ID = os.getenv("DEVICE_ID", "pi-001")
+    DEVICE_SECRET = os.getenv("DEVICE_SECRET", "")
+    BACKEND_URL = os.getenv("BACKEND_URL", "http://192.168.1.121:3000")
+    DEVICE_MASTER_SECRET = os.getenv("DEVICE_MASTER_SECRET", "super_secret_key")
+    MIN_CONFIDENCE_LOCAL = float(os.getenv("MIN_CONFIDENCE_LOCAL", 0.50))
+
+    HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", 60))
+
+    # Added for command polling
+    API_BASE_URL = os.getenv("API_BASE_URL", f"{BACKEND_URL}/api").rstrip("/")
+    COMMAND_POLL_INTERVAL_SEC = float(os.getenv("COMMAND_POLL_INTERVAL_SEC", 1.5))
+
+
+config = Config()
+
+
+# ============================================================
+# 2) ADD FILE: app/services/command_client.py
+# ============================================================
+# Polls backend for Pi commands and ACKs execution results.
+
+import time
+import threading
+import requests
+
+from app.config import config
+from app.utils.logger import get_logger
+
+logger = get_logger()
+
+
+class CommandClient:
+    def __init__(self, orchestrator):
+        self.orchestrator = orchestrator
+
+    def _headers(self):
+        return {
+            "x-device-key": config.DEVICE_MASTER_SECRET,
+            "Content-Type": "application/json",
+        }
+
+    def _next_command(self):
+        url = f"{config.API_BASE_URL}/pi/{config.DEVICE_ID}/commands/next"
+        res = requests.get(url, headers=self._headers(), timeout=5)
+        res.raise_for_status()
+        return res.json().get("command")
+
+    def _ack(self, command_id, status, message=""):
+        url = f"{config.API_BASE_URL}/pi/{config.DEVICE_ID}/commands/{command_id}/ack"
+        res = requests.patch(
+            url,
+            headers=self._headers(),
+            json={"status": status, "message": message},
+            timeout=5,
+        )
+        res.raise_for_status()
+
+    def loop_forever(self):
+        if not config.DEVICE_MASTER_SECRET:
+            logger.warning("DEVICE_MASTER_SECRET is empty; command poller disabled")
+            return
+
+        logger.info("Pi command poller started")
+
+        while True:
+            try:
+                command = self._next_command()
+                if not command:
+                    time.sleep(config.COMMAND_POLL_INTERVAL_SEC)
+                    continue
+
+                command_id = command.get("id")
+                command_name = command.get("name")
+
+                if command_name == "start_live":
+                    self.orchestrator.start_live()
+                elif command_name == "stop_live":
+                    self.orchestrator.stop_live()
+                elif command_name == "capture_now":
+                    self.orchestrator.capture_now()
+                elif command_name == "start_recording":
+                    self.orchestrator.start_recording()
+                elif command_name == "stop_recording":
+                    self.orchestrator.stop_recording()
+                else:
+                    raise ValueError(f"Unknown command: {command_name}")
+
+                self._ack(command_id, "executed", "ok")
+
+            except Exception as e:
+                logger.error(f"Command poller error: {e}")
+                time.sleep(2)
+
+
+# ============================================================
+# 3) UPDATE FILE: app/services/orchestrator.py
+# ============================================================
+# Add start_live, stop_live, capture_now, start_recording, stop_recording handlers.
+
+import time
+import threading
+from app.capture.camera import Camera
+from app.capture.motion import MotionDetector
+from app.config import config
+from app.utils.logger import get_logger
+from app.uploader.retry_queue import RetryQueue
+from app.uploader.worker import UploadWorker
+
+from ultralytics import YOLO
+
+logger = get_logger()
+
+
+class Orchestrator:
+
+    def __init__(self):
+        self.camera = Camera()
+        self.motion = MotionDetector()
+        self.queue = RetryQueue()
+        self.live_enabled = True
+        self._capture_lock = threading.Lock()
+
+        logger.info("Orchestrator initialized")
+
+        logger.info("Loading YOLOv8 Nano model...")
+        self.model = YOLO("yolov8n.pt")
+
+        self.worker = UploadWorker()
+        self.worker.start()
+
+    def classify(self, image_path):
+        results = self.model(image_path, verbose=False)
+
+        if not results or len(results[0].boxes) == 0:
+            logger.info("No objects detected.")
+            return None, 0.0
+
+        boxes = results[0].boxes
+        names = results[0].names
+
+        best_conf = 0
+        best_label = None
+
+        for box in boxes:
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            label = names[cls_id]
+
+            if conf > best_conf:
+                best_conf = conf
+                best_label = label
+
+        logger.info(f"Detected {best_label} ({round(best_conf, 2)})")
+        return best_label, round(best_conf, 2)
+
+    def _process_capture(self, force_upload=False):
+        if not self._capture_lock.acquire(blocking=False):
+            logger.warning("Capture skipped: camera is busy")
+            return False
+
+        try:
+            image = self.camera.capture()
+            if not image:
+                return False
+
+            species, confidence = self.classify(image)
+
+            # Manual capture fallback: still upload even with no detection.
+            if force_upload and not species:
+                species = "manual_capture"
+                confidence = config.MIN_CONFIDENCE_LOCAL
+                logger.info(
+                    "Manual capture with no detection. Forcing upload as manual_capture."
+                )
+
+            if not species:
+                return False
+
+            if confidence < config.MIN_CONFIDENCE_LOCAL:
+                if force_upload:
+                    confidence = config.MIN_CONFIDENCE_LOCAL
+                    logger.info("Manual capture below threshold. Forcing upload.")
+                else:
+                    logger.info("Confidence below threshold. Discarding.")
+                    return False
+
+            self.queue.add_event(image, species, confidence)
+            return True
+        finally:
+            self._capture_lock.release()
+
+    def start_live(self):
+        self.live_enabled = True
+        logger.info("Live mode enabled")
+
+    def stop_live(self):
+        self.live_enabled = False
+        logger.info("Live mode disabled")
+
+    def capture_now(self):
+        logger.info("Manual capture_now command received")
+        if not self._process_capture(force_upload=True):
+            time.sleep(1.0)
+            self._process_capture(force_upload=True)
+
+    def start_recording(self):
+        logger.info("Manual start_recording command received")
+        if hasattr(self.camera, "start_recording"):
+            self.camera.start_recording()
+        else:
+            logger.warning("Camera.start_recording() is not implemented")
+
+    def stop_recording(self):
+        logger.info("Manual stop_recording command received")
+        if hasattr(self.camera, "stop_recording"):
+            self.camera.stop_recording()
+        else:
+            logger.warning("Camera.stop_recording() is not implemented")
+
+    def run(self):
+        logger.info("System armed. Waiting for motion...")
+
+        while True:
+            if not self.live_enabled:
+                time.sleep(1)
+                continue
+
+            self.motion.wait_for_motion()
+            self._process_capture()
+            time.sleep(5)
+
+
+# ============================================================
+# 4) UPDATE FILE: app/main.py
+# ============================================================
+# Start command poller in a background thread.
+
+import os
+import threading
+
+os.environ["GPIOZERO_PIN_FACTORY"] = "lgpio"
+
+from app.services.orchestrator import Orchestrator
+from app.services.command_client import CommandClient
+from app.utils.logger import get_logger
+
+logger = get_logger()
+
+
+def main():
+    logger.info("WildPulse Pi Agent Starting...")
+    orchestrator = Orchestrator()
+
+    poller = CommandClient(orchestrator)
+    threading.Thread(target=poller.loop_forever, daemon=True).start()
+
+    orchestrator.run()
+
+
+if __name__ == "__main__":
+    main()
+
+
+# ============================================================
+# 4B) UPDATE FILE: app/capture/camera.py
+# ============================================================
+# Replace camera.py with this full version to support still capture + recording.
+
+import subprocess
+import os
+from datetime import datetime
+from app.utils.logger import get_logger
+
+logger = get_logger()
+
+IMAGE_DIR = "data/images"
+VIDEO_DIR = "data/videos"
+os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(VIDEO_DIR, exist_ok=True)
+
+
+class Camera:
+    def __init__(self):
+        self._record_proc = None
+        self._record_file = None
+
+    def capture(self):
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"{IMAGE_DIR}/capture_{timestamp}.jpg"
+
+        command = [
+            "rpicam-still",
+            "--zsl",
+            "-o", filename,
+            "--timeout", "1000",
+            "--nopreview"
+        ]
+
+        try:
+            subprocess.run(command, check=True)
+            logger.info(f"Image saved: {filename}")
+            return filename
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Camera capture failed: {e}")
+            return None
+
+    def start_recording(self):
+        if self._record_proc is not None:
+            logger.info(f"Recording already in progress: {self._record_file}")
+            return self._record_file
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        self._record_file = f"{VIDEO_DIR}/record_{timestamp}.h264"
+
+        command = [
+            "rpicam-vid",
+            "-o", self._record_file,
+            "--timeout", "0",
+            "--nopreview"
+        ]
+
+        try:
+            self._record_proc = subprocess.Popen(command)
+            logger.info(f"Recording started: {self._record_file}")
+            return self._record_file
+        except Exception as e:
+            logger.error(f"Failed to start recording: {e}")
+            self._record_proc = None
+            self._record_file = None
+            return None
+
+    def stop_recording(self):
+        if self._record_proc is None:
+            logger.info("No active recording to stop.")
+            return None
+
+        try:
+            self._record_proc.terminate()
+            self._record_proc.wait(timeout=5)
+            logger.info(f"Recording stopped: {self._record_file}")
+            return self._record_file
+        except Exception as e:
+            logger.error(f"Failed to stop recording cleanly: {e}")
+            return None
+        finally:
+            self._record_proc = None
+            self._record_file = None
+
+
+# ============================================================
+# 5) REFERENCE FILE: app/uploader/worker.py
+# ============================================================
+# Keep your existing uploader worker logic unless you want to refactor.
+# Your current worker code is compatible with this command feature.
+
+# ============================================================
+# ENV REQUIRED ON PI (.env)
+# ============================================================
+# DEVICE_ID=pi-001
+# BACKEND_URL=http://192.168.1.121:3000
+# API_BASE_URL=http://192.168.1.121:3000/api
+# DEVICE_MASTER_SECRET=<must exactly match backend DEVICE_MASTER_SECRET>
+# COMMAND_POLL_INTERVAL_SEC=1.5
