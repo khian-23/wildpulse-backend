@@ -4,12 +4,7 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableCors({
-    origin: [
-      'https://espproject-bafd4.web.app',
-      'https://espproject-bafd4.firebaseapp.com',
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ],
+    origin: true,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type,Authorization,x-device-key',
   });
