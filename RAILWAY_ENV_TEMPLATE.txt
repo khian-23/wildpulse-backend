@@ -1,0 +1,8 @@
+MONGODB_URI=mongodb+srv://mecoycokhian2_db_user:Ac5DecBuHJBSTgOC@cluster0.gvy5rss.mongodb.net/test
+MONGO_URI=mongodb+srv://mecoycokhian2_db_user:Ac5DecBuHJBSTgOC@cluster0.gvy5rss.mongodb.net/test
+DEVICE_MASTER_SECRET=super_secret_key
+CLOUDINARY_CLOUD_NAME=dpdzxynvu
+CLOUDINARY_API_KEY=674524674186288
+CLOUDINARY_API_SECRET=QNOhi3bSuHLYKGYI6YxK2TXChAE
+JWT_SECRET=ddef60539c94e37cabcfe1fc001a2bb7cb58bb89be9ef9cb1c195be714755f5c
+NODE_ENV=production
