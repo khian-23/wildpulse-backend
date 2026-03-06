@@ -78,31 +78,8 @@ export class CapturesService {
       confidence,
     );
 
-    const REVIEW_THRESHOLD = 0.5;
-    let resolvedStatus = decision.status;
-    let resolvedReason = decision.reason;
-
-    if (decision.status === 'discard') {
-
-      logger.info('Capture discarded', {
-        species,
-        confidence,
-        reason: decision.reason,
-      });
-
-      return {
-        message: 'Capture discarded by rule engine',
-        reason: decision.reason,
-      };
-    }
-
-    if (confidence > REVIEW_THRESHOLD) {
-      resolvedStatus = 'approved';
-      resolvedReason = 'confidence_above_0_50';
-    } else {
-      resolvedStatus = 'needs_review';
-      resolvedReason = 'confidence_at_or_below_0_50';
-    }
+    const resolvedStatus = 'needs_review';
+    const resolvedReason = `review_required:${decision.reason}`;
 
     // STEP 2 — Upload to Cloudinary
     const uploadResult: any = await new Promise((resolve, reject) => {
