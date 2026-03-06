@@ -68,7 +68,7 @@ export class CapturesService {
 
     const { device_id } = body;
     const confidence = Number(body.confidence);
-    const species = body.species.toLowerCase().trim();
+    const species = body.species.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
     const zoneId = body.zone_id?.trim();
     const capturedAt = body.captured_at ? new Date(body.captured_at) : new Date();
 
