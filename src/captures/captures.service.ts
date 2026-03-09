@@ -21,6 +21,7 @@ export class CapturesService {
     private readonly rulesService: RulesService,
     private readonly intelligenceService: IntelligenceService,
   ) {
+
     const cloudName = this.configService.get<string>('CLOUDINARY_CLOUD_NAME');
     const apiKey = this.configService.get<string>('CLOUDINARY_API_KEY');
     const apiSecret = this.configService.get<string>('CLOUDINARY_API_SECRET');
@@ -36,9 +37,16 @@ export class CapturesService {
     });
   }
 
+  /*
+  ─────────────────────────────
+  BACKGROUND AI PROCESSING
+  ─────────────────────────────
+  */
+
   private async processAIAsync(captureId: string) {
     try {
       const consumed = await this.usageService.tryConsume();
+
       if (!consumed) {
         logger.warn('AI usage limit reached', { captureId });
         return;
@@ -64,13 +72,27 @@ export class CapturesService {
     }
   }
 
+  /*
+  ─────────────────────────────
+  IMAGE UPLOAD HANDLER
+  ─────────────────────────────
+  */
+
   async handleUpload(file: Express.Multer.File, body: any) {
 
     const { device_id } = body;
     const confidence = Number(body.confidence);
-    const species = body.species.toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+
+    const species = body.species
+      .toLowerCase()
+      .replace(/_/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
     const zoneId = body.zone_id?.trim();
-    const capturedAt = body.captured_at ? new Date(body.captured_at) : new Date();
+    const capturedAt = body.captured_at
+      ? new Date(body.captured_at)
+      : new Date();
 
     // STEP 1 — Rule evaluation
     const decision = await this.rulesService.evaluate(
@@ -83,11 +105,14 @@ export class CapturesService {
 
     // STEP 2 — Upload to Cloudinary
     const uploadResult: any = await new Promise((resolve, reject) => {
+
       const stream = cloudinary.uploader.upload_stream(
         { folder: 'wildpulse' },
         (error, result) => {
+
           if (error) return reject(error);
           if (!result) return reject(new Error('Upload failed'));
+
           resolve(result);
         },
       );
@@ -105,6 +130,7 @@ export class CapturesService {
       rule_reason: resolvedReason,
       captured_at: capturedAt,
       zone_id: zoneId,
+
       ...this.intelligenceService.score({
         species,
         confidence,
@@ -144,6 +170,46 @@ export class CapturesService {
     return {
       message: 'Upload received',
       capture,
+    };
+  }
+
+  /*
+  ─────────────────────────────
+  DAILY REPORT
+  ─────────────────────────────
+  */
+
+  async getDailyReport(date?: string) {
+
+    const targetDate = date ? new Date(date) : new Date();
+
+    const start = new Date(targetDate);
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date(targetDate);
+    end.setHours(23, 59, 59, 999);
+
+    const captures = await this.captureModel.find({
+      captured_at: {
+        $gte: start,
+        $lte: end,
+      },
+    });
+
+    const alerts = captures.filter(c => c.should_alert).length;
+
+    const unusual = captures.filter(c => c.priority === 'high').length;
+
+    return {
+      date: start.toISOString().slice(0, 10),
+
+      totals: {
+        captures: captures.length,
+        alerts,
+        unusual,
+      },
+
+      summary: `${captures.length} wildlife captures detected on this date.`,
     };
   }
 }
