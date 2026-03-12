@@ -12,6 +12,7 @@ import { RulesModule } from './rules/rules.module';
 import { Capture, CaptureSchema } from './schemas/capture.schema';
 import { AiUsage, AiUsageSchema } from './usage/usage.schema';
 import { PiCommand, PiCommandSchema } from './schemas/pi-command.schema';
+import { AdminGuard } from './common/guards/admin.guard';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -39,6 +40,7 @@ import { PiCommand, PiCommandSchema } from './schemas/pi-command.schema';
   ],
   controllers: [AppController],  // ✅ THIS
   providers: [
+    AdminGuard,
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

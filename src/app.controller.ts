@@ -10,6 +10,7 @@ import {
   Post,
   Query,
   UnauthorizedException,
+  UseGuards,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model } from 'mongoose';
@@ -17,6 +18,7 @@ import { Connection, Model } from 'mongoose';
 import { Capture } from './schemas/capture.schema';
 import { AiUsage } from './usage/usage.schema';
 import { PiCommand } from './schemas/pi-command.schema';
+import { AdminGuard } from './common/guards/admin.guard';
 
 @Controller()
 export class AppController {
@@ -69,7 +71,151 @@ export class AppController {
     private readonly piCommandModel: Model<PiCommand>,
   ) {}
 
+  private getEventDateExpr() {
+    return { $ifNull: ['$captured_at', '$createdAt'] };
+  }
+
+  private parseTzOffsetMinutes(value?: string) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+
+    return Math.min(Math.max(Math.trunc(parsed), -840), 840);
+  }
+
+  private offsetToTimezone(offsetMinutes: number) {
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const absolute = Math.abs(offsetMinutes);
+    const hours = String(Math.floor(absolute / 60)).padStart(2, '0');
+    const minutes = String(absolute % 60).padStart(2, '0');
+
+    return `${sign}${hours}:${minutes}`;
+  }
+
+  private buildRangeMatch(start: Date, end: Date) {
+    return {
+      $expr: {
+        $and: [
+          { $gte: [this.getEventDateExpr(), start] },
+          { $lte: [this.getEventDateExpr(), end] },
+        ],
+      },
+    };
+  }
+
+  private buildDayRange(targetDate: string, offsetMinutes: number) {
+    const [year, month, day] = targetDate.split('-').map(Number);
+    const startUtc = new Date(
+      Date.UTC(year, month - 1, day, 0, 0, 0, 0) - offsetMinutes * 60_000,
+    );
+    const endUtc = new Date(
+      Date.UTC(year, month - 1, day, 23, 59, 59, 999) - offsetMinutes * 60_000,
+    );
+
+    return { startUtc, endUtc };
+  }
+
+  private buildMonthRange(targetMonth: string, offsetMinutes: number) {
+    const [year, month] = targetMonth.split('-').map(Number);
+    const startUtc = new Date(
+      Date.UTC(year, month - 1, 1, 0, 0, 0, 0) - offsetMinutes * 60_000,
+    );
+    const endUtc = new Date(
+      Date.UTC(year, month, 0, 23, 59, 59, 999) - offsetMinutes * 60_000,
+    );
+
+    return { startUtc, endUtc };
+  }
+
+  private buildYearRange(targetYear: string, offsetMinutes: number) {
+    const year = Number(targetYear);
+    const startUtc = new Date(
+      Date.UTC(year, 0, 1, 0, 0, 0, 0) - offsetMinutes * 60_000,
+    );
+    const endUtc = new Date(
+      Date.UTC(year, 11, 31, 23, 59, 59, 999) - offsetMinutes * 60_000,
+    );
+
+    return { startUtc, endUtc };
+  }
+
+  private async buildReportSummary(
+    startUtc: Date,
+    endUtc: Date,
+    timezone: string,
+  ) {
+    const match = this.buildRangeMatch(startUtc, endUtc);
+    const eventDateExpr = this.getEventDateExpr();
+
+    const [
+      totalCaptures,
+      alerts,
+      unusual,
+      topSpecies,
+      rareDetections,
+      suspiciousHumanAtNight,
+      peakHour,
+    ] = await Promise.all([
+      this.captureModel.countDocuments(match),
+      this.captureModel.countDocuments({
+        ...match,
+        should_alert: true,
+      }),
+      this.captureModel.countDocuments({
+        ...match,
+        is_unusual: true,
+      }),
+      this.captureModel.aggregate([
+        { $match: match },
+        { $group: { _id: '$species', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 },
+      ]),
+      this.captureModel.aggregate([
+        {
+          $match: {
+            ...match,
+            species: { $in: Array.from(this.rareSpecies) },
+          },
+        },
+        { $group: { _id: '$species', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+      this.captureModel.countDocuments({
+        ...match,
+        species: 'person',
+        is_night: true,
+      }),
+      this.captureModel.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              $hour: {
+                date: eventDateExpr,
+                timezone,
+              },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { count: -1 } },
+        { $limit: 1 },
+      ]),
+    ]);
+
+    return {
+      totalCaptures,
+      alerts,
+      unusual,
+      topSpecies,
+      rareDetections,
+      suspiciousHumanAtNight,
+      peakHour,
+    };
+  }
+
   @Post('pi/:deviceId/commands')
+  @UseGuards(AdminGuard)
   async queuePiCommand(
     @Param('deviceId') deviceId: string,
     @Body('command') command?: string,
@@ -227,29 +373,32 @@ export class AppController {
   }
 
   @Get('metrics')
-  async metrics() {
-    const today = new Date().toISOString().split('T')[0];
-    const startOfDay = new Date(today);
+  @UseGuards(AdminGuard)
+  async metrics(@Query('tzOffsetMinutes') tzOffsetMinutes?: string) {
+    const offsetMinutes = this.parseTzOffsetMinutes(tzOffsetMinutes);
+    const now = new Date();
+    const localNow = new Date(now.getTime() + offsetMinutes * 60_000);
+    const today = localNow.toISOString().slice(0, 10);
+    const { startUtc, endUtc } = this.buildDayRange(today, offsetMinutes);
+    const match = this.buildRangeMatch(startUtc, endUtc);
 
-    const totalToday = await this.captureModel.countDocuments({
-      createdAt: { $gte: startOfDay },
-    });
+    const totalToday = await this.captureModel.countDocuments(match);
 
     const approvedToday = await this.captureModel.countDocuments({
-      createdAt: { $gte: startOfDay },
+      ...match,
       status: 'approved',
     });
 
     const discardedToday = await this.captureModel.countDocuments({
-      createdAt: { $gte: startOfDay },
+      ...match,
       status: 'discard',
     });
     const alertsToday = await this.captureModel.countDocuments({
-      createdAt: { $gte: startOfDay },
+      ...match,
       should_alert: true,
     });
     const unusualToday = await this.captureModel.countDocuments({
-      createdAt: { $gte: startOfDay },
+      ...match,
       is_unusual: true,
     });
 
@@ -257,6 +406,7 @@ export class AppController {
 
     return {
       date: today,
+      timezoneOffsetMinutes: offsetMinutes,
       captures: {
         total: totalToday,
         approved: approvedToday,
@@ -273,16 +423,20 @@ export class AppController {
   }
 
   @Get('reports/daily')
-  async dailyReport(@Query('date') date?: string) {
-    const targetDate = date ?? new Date().toISOString().split('T')[0];
+  @UseGuards(AdminGuard)
+  async dailyReport(
+    @Query('date') date?: string,
+    @Query('tzOffsetMinutes') tzOffsetMinutes?: string,
+  ) {
+    const offsetMinutes = this.parseTzOffsetMinutes(tzOffsetMinutes);
+    const localNow = new Date(Date.now() + offsetMinutes * 60_000);
+    const targetDate = date ?? localNow.toISOString().slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) {
       throw new BadRequestException('date must be in YYYY-MM-DD format');
     }
-
-    const startOfDay = new Date(`${targetDate}T00:00:00.000Z`);
-    const endOfDay = new Date(`${targetDate}T23:59:59.999Z`);
-
-    const [
+    const timezone = this.offsetToTimezone(offsetMinutes);
+    const { startUtc, endUtc } = this.buildDayRange(targetDate, offsetMinutes);
+    const {
       totalCaptures,
       alerts,
       unusual,
@@ -290,51 +444,7 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
-    ] = await Promise.all([
-      this.captureModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-      }),
-      this.captureModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-        should_alert: true,
-      }),
-      this.captureModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-        is_unusual: true,
-      }),
-      this.captureModel.aggregate([
-        { $match: { createdAt: { $gte: startOfDay, $lte: endOfDay } } },
-        { $group: { _id: '$species', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-        { $limit: 5 },
-      ]),
-      this.captureModel.aggregate([
-        {
-          $match: {
-            createdAt: { $gte: startOfDay, $lte: endOfDay },
-            species: { $in: Array.from(this.rareSpecies) },
-          },
-        },
-        { $group: { _id: '$species', count: { $sum: 1 } } },
-        { $sort: { count: -1 } },
-      ]),
-      this.captureModel.countDocuments({
-        createdAt: { $gte: startOfDay, $lte: endOfDay },
-        species: 'person',
-        is_night: true,
-      }),
-      this.captureModel.aggregate([
-        { $match: { createdAt: { $gte: startOfDay, $lte: endOfDay } } },
-        {
-          $group: {
-            _id: { $hour: '$createdAt' },
-            count: { $sum: 1 },
-          },
-        },
-        { $sort: { count: -1 } },
-        { $limit: 1 },
-      ]),
-    ]);
+    } = await this.buildReportSummary(startUtc, endUtc, timezone);
 
     const topSpeciesName = topSpecies[0]?._id ?? null;
     const topSpeciesCount = topSpecies[0]?.count ?? 0;
@@ -354,6 +464,7 @@ export class AppController {
 
     return {
       date: targetDate,
+      timezoneOffsetMinutes: offsetMinutes,
       totals: {
         captures: totalCaptures,
         alerts,
@@ -373,14 +484,169 @@ export class AppController {
       peak_activity: peakActivityHour === null
         ? null
         : {
-            hour_utc: peakActivityHour,
+            hour_local: peakActivityHour,
             count: peakHourCount,
           },
       summary,
     };
   }
 
+  @Get('reports/monthly')
+  @UseGuards(AdminGuard)
+  async monthlyReport(
+    @Query('month') month?: string,
+    @Query('tzOffsetMinutes') tzOffsetMinutes?: string,
+  ) {
+    const offsetMinutes = this.parseTzOffsetMinutes(tzOffsetMinutes);
+    const now = new Date(Date.now() + offsetMinutes * 60_000);
+    const targetMonth = month ?? now.toISOString().slice(0, 7);
+    if (!/^\d{4}-\d{2}$/.test(targetMonth)) {
+      throw new BadRequestException('month must be in YYYY-MM format');
+    }
+
+    const timezone = this.offsetToTimezone(offsetMinutes);
+    const { startUtc, endUtc } = this.buildMonthRange(targetMonth, offsetMinutes);
+    const match = this.buildRangeMatch(startUtc, endUtc);
+    const eventDateExpr = this.getEventDateExpr();
+    const {
+      totalCaptures,
+      alerts,
+      unusual,
+      topSpecies,
+      rareDetections,
+      suspiciousHumanAtNight,
+      peakHour,
+    } = await this.buildReportSummary(startUtc, endUtc, timezone);
+
+    const dailyBreakdown = await this.captureModel.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: '%Y-%m-%d',
+              date: eventDateExpr,
+              timezone,
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    return {
+      month: targetMonth,
+      timezoneOffsetMinutes: offsetMinutes,
+      totals: {
+        captures: totalCaptures,
+        alerts,
+        unusual,
+      },
+      top_species: topSpecies.map((item) => ({
+        species: item._id,
+        count: item.count,
+      })),
+      rare_detections: rareDetections.map((item) => ({
+        species: item._id,
+        count: item.count,
+      })),
+      suspicious_activity: {
+        human_at_night: suspiciousHumanAtNight,
+      },
+      peak_activity: peakHour[0]?._id === undefined
+        ? null
+        : {
+            hour_local: peakHour[0]._id,
+            count: peakHour[0].count,
+          },
+      daily_breakdown: dailyBreakdown.map((item: any) => ({
+        day: item._id,
+        count: Number(item.count),
+      })),
+      summary: `Monthly Wildlife Report - ${targetMonth}\nTotal Captures: ${totalCaptures}\nAlerts Triggered: ${alerts}\nUnusual Events: ${unusual}`,
+    };
+  }
+
+  @Get('reports/yearly')
+  @UseGuards(AdminGuard)
+  async yearlyReport(
+    @Query('year') year?: string,
+    @Query('tzOffsetMinutes') tzOffsetMinutes?: string,
+  ) {
+    const offsetMinutes = this.parseTzOffsetMinutes(tzOffsetMinutes);
+    const now = new Date(Date.now() + offsetMinutes * 60_000);
+    const targetYear = year ?? now.toISOString().slice(0, 4);
+    if (!/^\d{4}$/.test(targetYear)) {
+      throw new BadRequestException('year must be in YYYY format');
+    }
+
+    const timezone = this.offsetToTimezone(offsetMinutes);
+    const { startUtc, endUtc } = this.buildYearRange(targetYear, offsetMinutes);
+    const match = this.buildRangeMatch(startUtc, endUtc);
+    const eventDateExpr = this.getEventDateExpr();
+    const {
+      totalCaptures,
+      alerts,
+      unusual,
+      topSpecies,
+      rareDetections,
+      suspiciousHumanAtNight,
+      peakHour,
+    } = await this.buildReportSummary(startUtc, endUtc, timezone);
+
+    const monthlyBreakdown = await this.captureModel.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: '%Y-%m',
+              date: eventDateExpr,
+              timezone,
+            },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { _id: 1 } },
+    ]);
+
+    return {
+      year: targetYear,
+      timezoneOffsetMinutes: offsetMinutes,
+      totals: {
+        captures: totalCaptures,
+        alerts,
+        unusual,
+      },
+      top_species: topSpecies.map((item) => ({
+        species: item._id,
+        count: item.count,
+      })),
+      rare_detections: rareDetections.map((item) => ({
+        species: item._id,
+        count: item.count,
+      })),
+      suspicious_activity: {
+        human_at_night: suspiciousHumanAtNight,
+      },
+      peak_activity: peakHour[0]?._id === undefined
+        ? null
+        : {
+            hour_local: peakHour[0]._id,
+            count: peakHour[0].count,
+          },
+      monthly_breakdown: monthlyBreakdown.map((item: any) => ({
+        month: item._id,
+        count: Number(item.count),
+      })),
+      summary: `Yearly Wildlife Report - ${targetYear}\nTotal Captures: ${totalCaptures}\nAlerts Triggered: ${alerts}\nUnusual Events: ${unusual}`,
+    };
+  }
+
   @Get('images')
+  @UseGuards(AdminGuard)
   async images(@Query('limit') limit?: string) {
     const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
 
@@ -427,6 +693,7 @@ export class AppController {
   }
 
   @Get('alerts')
+  @UseGuards(AdminGuard)
   async alerts(@Query('limit') limit?: string) {
     const parsedLimit = Math.min(Math.max(Number(limit) || 30, 1), 200);
 
@@ -466,6 +733,7 @@ export class AppController {
   }
 
   @Get('needs-review')
+  @UseGuards(AdminGuard)
   async needsReview(
     @Query('limit') limit?: string,
     @Query('species') species?: string,
@@ -542,6 +810,7 @@ export class AppController {
   }
 
   @Patch('needs-review/:id/action')
+  @UseGuards(AdminGuard)
   async reviewAction(
     @Param('id') id: string,
     @Body('action') action?: string,
@@ -593,6 +862,7 @@ export class AppController {
   }
 
   @Patch('needs-review/actions/bulk')
+  @UseGuards(AdminGuard)
   async reviewBulkAction(
     @Body('ids') ids?: string[],
     @Body('action') action?: string,
@@ -659,6 +929,7 @@ export class AppController {
   }
 
   @Get('conservation/list')
+  @UseGuards(AdminGuard)
   conservationList(@Query('q') q?: string, @Query('limit') limit?: string) {
     const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
     const query = (q ?? '').trim().toLowerCase();
@@ -684,48 +955,69 @@ export class AppController {
   }
 
   @Get('dashboard/overview')
-  async dashboardOverview(@Query('days') days?: string) {
+  @UseGuards(AdminGuard)
+  async dashboardOverview(
+    @Query('days') days?: string,
+    @Query('tzOffsetMinutes') tzOffsetMinutes?: string,
+  ) {
     const parsedDays = Math.min(Math.max(Number(days) || 7, 1), 30);
-
-    const now = new Date();
-    const start = new Date(now);
-    start.setUTCHours(0, 0, 0, 0);
-    start.setUTCDate(start.getUTCDate() - (parsedDays - 1));
+    const offsetMinutes = this.parseTzOffsetMinutes(tzOffsetMinutes);
+    const timezone = this.offsetToTimezone(offsetMinutes);
+    const localNow = new Date(Date.now() + offsetMinutes * 60_000);
+    const lastDay = localNow.toISOString().slice(0, 10);
+    const { endUtc } = this.buildDayRange(lastDay, offsetMinutes);
+    const localStart = new Date(localNow);
+    localStart.setUTCDate(localStart.getUTCDate() - (parsedDays - 1));
+    const startDay = localStart.toISOString().slice(0, 10);
+    const { startUtc } = this.buildDayRange(startDay, offsetMinutes);
+    const match = this.buildRangeMatch(startUtc, endUtc);
+    const eventDateExpr = this.getEventDateExpr();
 
     const [dailyTrendRaw, statusRaw, topSpeciesRaw, hourlyRaw, alertCount] =
       await Promise.all([
         this.captureModel.aggregate([
-          { $match: { createdAt: { $gte: start } } },
+          { $match: match },
           {
             $group: {
-              _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+              _id: {
+                $dateToString: {
+                  format: '%Y-%m-%d',
+                  date: eventDateExpr,
+                  timezone,
+                },
+              },
               count: { $sum: 1 },
             },
           },
           { $sort: { _id: 1 } },
         ]),
         this.captureModel.aggregate([
-          { $match: { createdAt: { $gte: start } } },
+          { $match: match },
           { $group: { _id: '$status', count: { $sum: 1 } } },
         ]),
         this.captureModel.aggregate([
-          { $match: { createdAt: { $gte: start } } },
+          { $match: match },
           { $group: { _id: '$species', count: { $sum: 1 } } },
           { $sort: { count: -1 } },
           { $limit: 5 },
         ]),
         this.captureModel.aggregate([
-          { $match: { createdAt: { $gte: start } } },
+          { $match: match },
           {
             $group: {
-              _id: { $hour: '$createdAt' },
+              _id: {
+                $hour: {
+                  date: eventDateExpr,
+                  timezone,
+                },
+              },
               count: { $sum: 1 },
             },
           },
           { $sort: { _id: 1 } },
         ]),
         this.captureModel.countDocuments({
-          createdAt: { $gte: start },
+          ...match,
           should_alert: true,
         }),
       ]);
@@ -735,8 +1027,8 @@ export class AppController {
     );
 
     const dailyTrend = Array.from({ length: parsedDays }, (_, i) => {
-      const d = new Date(start);
-      d.setUTCDate(start.getUTCDate() + i);
+      const d = new Date(localStart);
+      d.setUTCDate(localStart.getUTCDate() + i);
       const key = d.toISOString().slice(0, 10);
       return {
         day: key,
@@ -758,9 +1050,10 @@ export class AppController {
 
     return {
       days: parsedDays,
+      timezoneOffsetMinutes: offsetMinutes,
       range: {
-        start: start.toISOString(),
-        end: now.toISOString(),
+        start: startUtc.toISOString(),
+        end: endUtc.toISOString(),
       },
       totals: {
         captures: dailyTrend.reduce((sum, d) => sum + d.count, 0),
