@@ -401,6 +401,24 @@ export class AppController {
     };
   }
 
+  @Delete('devices/:deviceId')
+  @UseGuards(AdminGuard)
+  async deleteDevice(@Param('deviceId') deviceId: string) {
+    const normalizedDeviceId = (deviceId ?? '').trim();
+    if (!normalizedDeviceId) {
+      throw new BadRequestException('deviceId is required');
+    }
+
+    const result = await this.deviceModel.deleteOne({
+      device_id: normalizedDeviceId,
+    });
+
+    return {
+      deviceId: normalizedDeviceId,
+      deleted: result.deletedCount === 1,
+    };
+  }
+
   @Patch('pi/:deviceId/commands/:id/ack')
   async acknowledgePiCommand(
     @Param('deviceId') deviceId: string,
