@@ -761,6 +761,8 @@ export class AppController {
   async images(
     @Query('limit') limit?: string,
     @Query('deviceId') deviceId?: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
   ) {
     const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
 
@@ -770,6 +772,33 @@ export class AppController {
     };
     if (deviceId) {
       filter.device_id = deviceId;
+    }
+
+    const start = startDate ? new Date(startDate) : null;
+    const end = endDate ? new Date(endDate) : null;
+    const hasStart = !!start && !Number.isNaN(start.getTime());
+    const hasEnd = !!end && !Number.isNaN(end.getTime());
+    if (hasStart || hasEnd) {
+      const capturedRange: Record<string, Date> = {};
+      const createdRange: Record<string, Date> = {};
+      if (hasStart && start) {
+        capturedRange.$gte = start;
+        createdRange.$gte = start;
+      }
+      if (hasEnd && end) {
+        capturedRange.$lt = end;
+        createdRange.$lt = end;
+      }
+
+      filter.$and = [
+        {
+          $or: [
+            { captured_at: capturedRange },
+            { captured_at: { $exists: false }, createdAt: createdRange },
+            { captured_at: null, createdAt: createdRange },
+          ],
+        },
+      ];
     }
 
     const captures = await this.captureModel
