@@ -18,6 +18,7 @@ import { Connection, Model } from 'mongoose';
 import { Capture } from './schemas/capture.schema';
 import { AiUsage } from './usage/usage.schema';
 import { PiCommand } from './schemas/pi-command.schema';
+import { Device } from './schemas/device.schema';
 import { AdminGuard } from './common/guards/admin.guard';
 
 @Controller()
@@ -69,6 +70,8 @@ export class AppController {
     private readonly usageModel: Model<AiUsage>,
     @InjectModel(PiCommand.name)
     private readonly piCommandModel: Model<PiCommand>,
+    @InjectModel(Device.name)
+    private readonly deviceModel: Model<Device>,
   ) {}
 
   private getEventDateExpr() {
@@ -266,6 +269,14 @@ export class AppController {
     }
 
     const now = new Date();
+    this.deviceModel.updateOne(
+      { device_id: deviceId },
+      { $set: { last_seen: now } },
+      { upsert: true },
+    ).catch((error) => {
+      // Avoid blocking command polling if device tracking fails.
+      console.error('Device heartbeat update failed', error);
+    });
     await this.piCommandModel.updateMany(
       {
         device_id: deviceId,
@@ -307,6 +318,37 @@ export class AppController {
         expiresAt: command.expires_at,
       },
     };
+  }
+
+  @Get('devices')
+  @UseGuards(AdminGuard)
+  async listDevices(
+    @Query('offlineAfterSeconds') offlineAfterSeconds?: string,
+  ) {
+    const parsedThreshold = Number(offlineAfterSeconds);
+    const thresholdSeconds = Number.isFinite(parsedThreshold)
+      ? Math.min(Math.max(Math.trunc(parsedThreshold), 30), 3600)
+      : 120;
+    const cutoff = new Date(Date.now() - thresholdSeconds * 1000);
+
+    const devices = await this.deviceModel.find(
+      {},
+      { device_id: 1, name: 1, last_seen: 1, createdAt: 1, updatedAt: 1 },
+    ).sort({ device_id: 1 }).lean();
+
+    return devices.map((device) => {
+      const lastSeen =
+        device.last_seen ?? device.updatedAt ?? device.createdAt ?? null;
+      const online = lastSeen ? lastSeen >= cutoff : false;
+
+      return {
+        deviceId: device.device_id,
+        name: device.name ?? device.device_id,
+        lastSeen,
+        status: online ? 'online' : 'offline',
+        online,
+      };
+    });
   }
 
   @Patch('pi/:deviceId/commands/:id/ack')

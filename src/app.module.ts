@@ -12,6 +12,7 @@ import { RulesModule } from './rules/rules.module';
 import { Capture, CaptureSchema } from './schemas/capture.schema';
 import { AiUsage, AiUsageSchema } from './usage/usage.schema';
 import { PiCommand, PiCommandSchema } from './schemas/pi-command.schema';
+import { Device, DeviceSchema } from './schemas/device.schema';
 import { AdminGuard } from './common/guards/admin.guard';
 @Module({
   imports: [
@@ -36,6 +37,7 @@ import { AdminGuard } from './common/guards/admin.guard';
       { name: Capture.name, schema: CaptureSchema },
       { name: AiUsage.name, schema: AiUsageSchema },
       { name: PiCommand.name, schema: PiCommandSchema },
+      { name: Device.name, schema: DeviceSchema },
     ]),
   ],
   controllers: [AppController],  // ✅ THIS
