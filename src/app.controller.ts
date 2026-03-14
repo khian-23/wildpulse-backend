@@ -758,16 +758,25 @@ export class AppController {
 
   @Get('images')
   @UseGuards(AdminGuard)
-  async images(@Query('limit') limit?: string) {
+  async images(
+    @Query('limit') limit?: string,
+    @Query('deviceId') deviceId?: string,
+  ) {
     const parsedLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+
+    const filter: Record<string, any> = {
+      image_url: { $exists: true, $ne: '' },
+      status: 'approved',
+    };
+    if (deviceId) {
+      filter.device_id = deviceId;
+    }
 
     const captures = await this.captureModel
       .find(
+        filter,
         {
-          image_url: { $exists: true, $ne: '' },
-          status: 'approved',
-        },
-        {
+          device_id: 1,
           image_url: 1,
           createdAt: 1,
           captured_at: 1,
@@ -788,6 +797,7 @@ export class AppController {
 
     return captures.map((capture) => ({
       id: String(capture._id),
+      deviceId: capture.device_id,
       url: capture.image_url,
       createdAt: capture.createdAt,
       capturedAt: capture.captured_at ?? capture.createdAt,
