@@ -14,6 +14,12 @@ export class Device {
   @Prop()
   last_seen?: Date;
 
+  @Prop()
+  lat?: number;
+
+  @Prop()
+  lng?: number;
+
   @Prop({ type: Object, default: {} })
   metadata?: Record<string, any>;
 

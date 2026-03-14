@@ -333,7 +333,15 @@ export class AppController {
 
     const devices = await this.deviceModel.find(
       {},
-      { device_id: 1, name: 1, last_seen: 1, createdAt: 1, updatedAt: 1 },
+      {
+        device_id: 1,
+        name: 1,
+        last_seen: 1,
+        lat: 1,
+        lng: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
     ).sort({ device_id: 1 }).lean();
 
     return devices.map((device) => {
@@ -347,8 +355,50 @@ export class AppController {
         lastSeen,
         status: online ? 'online' : 'offline',
         online,
+        lat: device.lat ?? null,
+        lng: device.lng ?? null,
       };
     });
+  }
+
+  @Patch('devices/:deviceId/location')
+  @UseGuards(AdminGuard)
+  async updateDeviceLocation(
+    @Param('deviceId') deviceId: string,
+    @Body('lat') lat?: number,
+    @Body('lng') lng?: number,
+  ) {
+    const normalizedDeviceId = (deviceId ?? '').trim();
+    if (!normalizedDeviceId) {
+      throw new BadRequestException('deviceId is required');
+    }
+
+    const parsedLat = Number(lat);
+    const parsedLng = Number(lng);
+    if (!Number.isFinite(parsedLat) || parsedLat < -90 || parsedLat > 90) {
+      throw new BadRequestException('lat must be a valid latitude');
+    }
+    if (!Number.isFinite(parsedLng) || parsedLng < -180 || parsedLng > 180) {
+      throw new BadRequestException('lng must be a valid longitude');
+    }
+
+    const updated = await this.deviceModel.findOneAndUpdate(
+      { device_id: normalizedDeviceId },
+      {
+        $set: {
+          lat: parsedLat,
+          lng: parsedLng,
+        },
+      },
+      { new: true, upsert: true },
+    );
+
+    return {
+      deviceId: updated.device_id,
+      name: updated.name ?? updated.device_id,
+      lat: updated.lat ?? null,
+      lng: updated.lng ?? null,
+    };
   }
 
   @Patch('pi/:deviceId/commands/:id/ack')
