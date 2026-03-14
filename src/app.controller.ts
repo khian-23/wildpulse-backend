@@ -158,6 +158,7 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
+      statusRaw,
     ] = await Promise.all([
       this.captureModel.countDocuments(match),
       this.captureModel.countDocuments({
@@ -205,7 +206,15 @@ export class AppController {
         { $sort: { count: -1 } },
         { $limit: 1 },
       ]),
+      this.captureModel.aggregate([
+        { $match: match },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
     ]);
+
+    const statusMap = new Map<string, number>(
+      statusRaw.map((item: any) => [String(item._id || 'unknown'), Number(item.count)]),
+    );
 
     return {
       totalCaptures,
@@ -215,6 +224,11 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
+      statuses: Array.from(statusMap.entries()).map(([status, count]) => ({
+        status,
+        count,
+      })),
+      statusMap,
     };
   }
 
@@ -555,6 +569,8 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
+      statuses,
+      statusMap,
     } = await this.buildReportSummary(startUtc, endUtc, timezone);
 
     const topSpeciesName = topSpecies[0]?._id ?? null;
@@ -580,7 +596,11 @@ export class AppController {
         captures: totalCaptures,
         alerts,
         unusual,
+        approved: statusMap.get('approved') ?? 0,
+        needs_review: statusMap.get('needs_review') ?? 0,
+        discard: statusMap.get('discard') ?? 0,
       },
+      statuses,
       top_species: topSpecies.map((item) => ({
         species: item._id,
         count: item.count,
@@ -627,6 +647,8 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
+      statuses,
+      statusMap,
     } = await this.buildReportSummary(startUtc, endUtc, timezone);
 
     const dailyBreakdown = await this.captureModel.aggregate([
@@ -653,7 +675,11 @@ export class AppController {
         captures: totalCaptures,
         alerts,
         unusual,
+        approved: statusMap.get('approved') ?? 0,
+        needs_review: statusMap.get('needs_review') ?? 0,
+        discard: statusMap.get('discard') ?? 0,
       },
+      statuses,
       top_species: topSpecies.map((item) => ({
         species: item._id,
         count: item.count,
@@ -704,6 +730,8 @@ export class AppController {
       rareDetections,
       suspiciousHumanAtNight,
       peakHour,
+      statuses,
+      statusMap,
     } = await this.buildReportSummary(startUtc, endUtc, timezone);
 
     const monthlyBreakdown = await this.captureModel.aggregate([
@@ -730,7 +758,11 @@ export class AppController {
         captures: totalCaptures,
         alerts,
         unusual,
+        approved: statusMap.get('approved') ?? 0,
+        needs_review: statusMap.get('needs_review') ?? 0,
+        discard: statusMap.get('discard') ?? 0,
       },
+      statuses,
       top_species: topSpecies.map((item) => ({
         species: item._id,
         count: item.count,
