@@ -3,10 +3,22 @@ import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const corsOrigins = process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',')
+        .map((origin) => origin.trim())
+        .filter((origin) => origin.length > 0)
+    : true;
   app.enableCors({
-    origin: true,
+    origin: corsOrigins,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
-    allowedHeaders: 'Content-Type,Authorization,x-device-key,x-admin-key',
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'x-device-key',
+      'x-admin-key',
+      'x-admin-secret',
+      'x-device-id',
+    ],
   });
   app.setGlobalPrefix('api');
 
