@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Capture } from '../schemas/capture.schema';
+import { Capture, CaptureDocument } from '../schemas/capture.schema';
 import { Model } from 'mongoose';
 import { v2 as cloudinary } from 'cloudinary';
 import { ConfigService } from '@nestjs/config';
@@ -41,7 +41,7 @@ export class CapturesService {
     });
   }
 
-  private async notifyCapture(capture: Capture) {
+  private async notifyCapture(capture: CaptureDocument) {
     if (!this.fcmService.isEnabled()) {
       return;
     }
