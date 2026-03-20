@@ -20,6 +20,18 @@ export class Device {
   @Prop()
   lng?: number;
 
+  @Prop({
+    type: [
+      {
+        token: { type: String, required: true },
+        platform: { type: String },
+        last_seen: { type: Date },
+      },
+    ],
+    default: [],
+  })
+  fcm_tokens?: { token: string; platform?: string; last_seen?: Date }[];
+
   @Prop({ type: Object, default: {} })
   metadata?: Record<string, any>;
 

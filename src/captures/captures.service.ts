@@ -9,17 +9,21 @@ import { AiService } from '../ai/ai.service';
 import { UsageService } from '../usage/usage.service';
 import { logger } from '../common/logger/wildpulse.logger';
 import { IntelligenceService } from './intelligence.service';
+import { Device } from '../schemas/device.schema';
+import { FcmService } from '../common/notifications/fcm.service';
 
 @Injectable()
 export class CapturesService {
 
   constructor(
     @InjectModel(Capture.name) private captureModel: Model<Capture>,
+    @InjectModel(Device.name) private deviceModel: Model<Device>,
     private configService: ConfigService,
     private readonly aiService: AiService,
     private readonly usageService: UsageService,
     private readonly rulesService: RulesService,
     private readonly intelligenceService: IntelligenceService,
+    private readonly fcmService: FcmService,
   ) {
 
     const cloudName = this.configService.get<string>('CLOUDINARY_CLOUD_NAME');
@@ -34,6 +38,39 @@ export class CapturesService {
       cloud_name: cloudName,
       api_key: apiKey,
       api_secret: apiSecret,
+    });
+  }
+
+  private async notifyCapture(capture: Capture) {
+    if (!this.fcmService.isEnabled()) {
+      return;
+    }
+
+    const deviceId = capture.device_id;
+    if (!deviceId) {
+      return;
+    }
+
+    const device = await this.deviceModel.findOne(
+      { device_id: deviceId },
+      { fcm_tokens: 1 },
+    ).lean();
+    const tokens =
+      device?.fcm_tokens?.map((entry) => entry.token).filter(Boolean) ?? [];
+    if (tokens.length === 0) {
+      return;
+    }
+
+    await this.fcmService.sendCaptureNotification(tokens, {
+      captureId: String(capture._id),
+      deviceId,
+      species: capture.species,
+      confidence: capture.confidence,
+      imageUrl: capture.image_url,
+      capturedAt: (capture.captured_at ?? capture.createdAt ?? new Date())
+        .toISOString(),
+      shouldAlert: Boolean(capture.should_alert),
+      priority: capture.priority ?? 'low',
     });
   }
 
@@ -149,6 +186,14 @@ export class CapturesService {
       risk_score: capture.risk_score,
       should_alert: capture.should_alert,
       priority: capture.priority,
+    });
+
+    this.notifyCapture(capture).catch((error) => {
+      logger.error('FCM notify failed', {
+        error,
+        capture_id: capture._id,
+        device_id,
+      });
     });
 
     if (capture.should_alert) {

@@ -14,6 +14,7 @@ import { AiUsage, AiUsageSchema } from './usage/usage.schema';
 import { PiCommand, PiCommandSchema } from './schemas/pi-command.schema';
 import { Device, DeviceSchema } from './schemas/device.schema';
 import { AdminGuard } from './common/guards/admin.guard';
+import { FcmService } from './common/notifications/fcm.service';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -43,6 +44,7 @@ import { AdminGuard } from './common/guards/admin.guard';
   controllers: [AppController],  // ✅ THIS
   providers: [
     AdminGuard,
+    FcmService,
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,

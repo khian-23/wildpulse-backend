@@ -416,6 +416,103 @@ export class AppController {
     };
   }
 
+  @Post('devices/:deviceId/fcm-token')
+  @UseGuards(AdminGuard)
+  async registerDeviceToken(
+    @Param('deviceId') deviceId: string,
+    @Body('token') token?: string,
+    @Body('platform') platform?: string,
+  ) {
+    const normalizedDeviceId = (deviceId ?? '').trim();
+    if (!normalizedDeviceId) {
+      throw new BadRequestException('deviceId is required');
+    }
+
+    const normalizedToken = (token ?? '').trim();
+    if (!normalizedToken) {
+      throw new BadRequestException('token is required');
+    }
+
+    const normalizedPlatform = (platform ?? '').trim();
+    const now = new Date();
+
+    let device = await this.deviceModel.findOne({
+      device_id: normalizedDeviceId,
+    });
+    if (!device) {
+      device = new this.deviceModel({
+        device_id: normalizedDeviceId,
+        name: normalizedDeviceId,
+      });
+    }
+
+    const tokens = device.fcm_tokens ?? [];
+    const existing = tokens.find((entry) => entry.token === normalizedToken);
+    if (existing) {
+      existing.last_seen = now;
+      if (normalizedPlatform) {
+        existing.platform = normalizedPlatform;
+      }
+    } else {
+      tokens.push({
+        token: normalizedToken,
+        platform: normalizedPlatform || undefined,
+        last_seen: now,
+      });
+    }
+
+    device.fcm_tokens = tokens;
+    device.last_seen = now;
+    await device.save();
+
+    return {
+      deviceId: device.device_id,
+      token: normalizedToken,
+      tokens: tokens.length,
+    };
+  }
+
+  @Delete('devices/:deviceId/fcm-token')
+  @UseGuards(AdminGuard)
+  async deleteDeviceToken(
+    @Param('deviceId') deviceId: string,
+    @Body('token') token?: string,
+  ) {
+    const normalizedDeviceId = (deviceId ?? '').trim();
+    if (!normalizedDeviceId) {
+      throw new BadRequestException('deviceId is required');
+    }
+
+    const normalizedToken = (token ?? '').trim();
+    if (!normalizedToken) {
+      throw new BadRequestException('token is required');
+    }
+
+    const device = await this.deviceModel.findOne({
+      device_id: normalizedDeviceId,
+    });
+    if (!device || !device.fcm_tokens?.length) {
+      return {
+        deviceId: normalizedDeviceId,
+        deleted: false,
+      };
+    }
+
+    const before = device.fcm_tokens.length;
+    device.fcm_tokens = device.fcm_tokens.filter(
+      (entry) => entry.token !== normalizedToken,
+    );
+    const deleted = device.fcm_tokens.length < before;
+    if (deleted) {
+      await device.save();
+    }
+
+    return {
+      deviceId: normalizedDeviceId,
+      deleted,
+    };
+  }
+
   @Delete('devices/:deviceId')
   @UseGuards(AdminGuard)
   async deleteDevice(@Param('deviceId') deviceId: string) {
