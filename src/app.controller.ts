@@ -852,7 +852,7 @@ export class AppController {
           priority: 1,
         },
       )
-      .sort({ createdAt: -1 })
+      .sort({ captured_at: -1, createdAt: -1 })
       .limit(parsedLimit)
       .lean();
 
@@ -949,6 +949,8 @@ export class AppController {
 
     const sortFieldMap: Record<string, string> = {
       createdAt: 'createdAt',
+      capturedAt: 'captured_at',
+      captured_at: 'captured_at',
       riskScore: 'risk_score',
       priority: 'priority',
     };
@@ -971,7 +973,7 @@ export class AppController {
           status: 1,
         },
       )
-      .sort({ [sortField]: sortDirection })
+      .sort({ [sortField]: sortDirection, createdAt: sortDirection })
       .limit(parsedLimit)
       .lean();
 
